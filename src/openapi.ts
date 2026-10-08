@@ -118,6 +118,50 @@ export const openapi = {
         },
       },
     },
+    '/auth/delete-account/request': {
+      post: {
+        tags: ['auth'],
+        summary: 'Отправить на почту 6-значный код для удаления аккаунта',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Код отправлен (действует 10 минут, новый код отменяет предыдущий)',
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { message: { type: 'string' } } },
+              },
+            },
+          },
+          401: errorResponse('Нет токена или он недействителен'),
+          429: errorResponse('Слишком часто. Заголовок Retry-After — через сколько секунд повторить'),
+          502: errorResponse('Не удалось отправить письмо'),
+        },
+      },
+    },
+    '/auth/delete-account/confirm': {
+      post: {
+        tags: ['auth'],
+        summary: 'Удалить аккаунт по коду из письма (необратимо)',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['code'],
+                properties: { code: { type: 'string', pattern: '^\\d{6}$', example: '123456' } },
+              },
+            },
+          },
+        },
+        responses: {
+          204: { description: 'Аккаунт и все его сессии удалены' },
+          400: errorResponse('Неверный, устаревший или исчерпавший 5 попыток код'),
+          401: errorResponse('Нет токена или он недействителен'),
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {

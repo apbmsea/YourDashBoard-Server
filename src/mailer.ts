@@ -53,3 +53,17 @@ export async function sendMagicLink(email: string, link: string): Promise<void> 
 <p style="color:#666">Ссылка действует ${minutes} мин. и работает один раз. Если вы не запрашивали вход — просто проигнорируйте это письмо.</p>`,
   });
 }
+
+export async function sendDeletionCode(email: string, code: string, minutes: number): Promise<void> {
+  const note = `Код действует ${minutes} мин. После подтверждения аккаунт и все его данные будут удалены без возможности восстановления. Если вы не запрашивали удаление — никому не сообщайте код и проигнорируйте это письмо.`;
+  const transport = await createTransport();
+  await transport.sendMail({
+    from: config.MAIL_FROM,
+    to: email,
+    subject: 'Код для удаления аккаунта YourDashBoard',
+    text: `Код для удаления аккаунта: ${code}\n\n${note}`,
+    html: `<p>Код для удаления аккаунта YourDashBoard:</p>
+<p style="font-size:28px;font-weight:bold;letter-spacing:6px">${code}</p>
+<p style="color:#666">${note}</p>`,
+  });
+}

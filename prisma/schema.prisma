@@ -13,6 +13,7 @@ model User {
   createdAt     DateTime       @default(now())
   lastLoginAt   DateTime?
   refreshTokens RefreshToken[]
+  deletionCodes DeletionCode[]
 }
 
 // One-time magic link. Only the SHA-256 hash of the token is stored.
@@ -42,4 +43,20 @@ model RefreshToken {
   createdAt DateTime  @default(now())
 
   @@index([userId])
+}
+
+// Six-digit code that confirms account deletion. Only an HMAC of the code is stored.
+// Rows double as the send log for rate limiting.
+model DeletionCode {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  // Wrong guesses so far; the code is dead once the limit is reached
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
 }

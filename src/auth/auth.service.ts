@@ -1,10 +1,10 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { config } from '../config.js';
 import { prisma } from '../db.js';
 import { HttpError } from '../errors.js';
-import { sendMagicLink } from '../mailer.js';
-import { assertCanRequestLink } from './rate-limit.js';
+import { sendDeletionCode, sendMagicLink } from '../mailer.js';
+import { assertCanRequestDeletionCode, assertCanRequestLink } from './rate-limit.js';
 
 export interface JwtPayload {
   sub: string;
@@ -12,9 +12,14 @@ export interface JwtPayload {
 }
 
 const DAY_MS = 24 * 60 * 60_000;
+const DELETION_CODE_TTL_MINUTES = 10;
+const DELETION_CODE_MAX_ATTEMPTS = 5;
 
 const newToken = () => randomBytes(32).toString('base64url');
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+// A six-digit code is trivial to brute-force from a plain hash, so it is keyed with the server secret
+const hashCode = (userId: string, code: string) =>
+  createHmac('sha256', config.JWT_SECRET).update(`${userId}:${code}`).digest();
 
 export async function requestMagicLink(email: string, ip: string | undefined): Promise<void> {
   await assertCanRequestLink(email, ip);
@@ -109,6 +114,65 @@ export async function logout(refreshToken: string): Promise<void> {
     where: { tokenHash: hashToken(refreshToken), revokedAt: null },
     data: { revokedAt: new Date() },
   });
+}
+
+export async function requestAccountDeletion(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw new HttpError(401, 'Пользователь не найден');
+  await assertCanRequestDeletionCode(userId);
+
+  const code = String(randomInt(1_000_000)).padStart(6, '0');
+  const row = await prisma.deletionCode.create({
+    data: {
+      userId,
+      codeHash: hashCode(userId, code).toString('hex'),
+      expiresAt: new Date(Date.now() + DELETION_CODE_TTL_MINUTES * 60_000),
+    },
+  });
+
+  try {
+    await sendDeletionCode(user.email, code, DELETION_CODE_TTL_MINUTES);
+  } catch (err) {
+    // Don't let a failed send eat into the user's rate limit
+    await prisma.deletionCode.delete({ where: { id: row.id } });
+    console.error('Failed to send deletion code:', err);
+    throw new HttpError(502, 'Не удалось отправить письмо, попробуйте позже');
+  }
+
+  const now = new Date();
+  await prisma.$transaction([
+    // Only the most recent code stays valid
+    prisma.deletionCode.updateMany({
+      where: { userId, usedAt: null, id: { not: row.id } },
+      data: { usedAt: now },
+    }),
+    // Rows older than the rate-limit window are no longer needed
+    prisma.deletionCode.deleteMany({ where: { createdAt: { lt: new Date(now.getTime() - DAY_MS) } } }),
+  ]);
+}
+
+export async function confirmAccountDeletion(userId: string, code: string): Promise<void> {
+  const invalid = new HttpError(400, 'Код недействителен или устарел, запросите новый');
+  const row = await prisma.deletionCode.findFirst({
+    where: { userId, usedAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!row) throw invalid;
+
+  // The attempt is counted before the comparison, so parallel guesses can't exceed the limit
+  const counted = await prisma.deletionCode.updateMany({
+    where: { id: row.id, usedAt: null, attempts: { lt: DELETION_CODE_MAX_ATTEMPTS } },
+    data: { attempts: { increment: 1 } },
+  });
+  if (counted.count === 0) throw invalid;
+
+  if (!timingSafeEqual(hashCode(userId, code), Buffer.from(row.codeHash, 'hex'))) {
+    const left = DELETION_CODE_MAX_ATTEMPTS - row.attempts - 1;
+    throw left > 0 ? new HttpError(400, `Неверный код. Осталось попыток: ${left}`) : invalid;
+  }
+
+  // Sessions and codes go with the user (onDelete: Cascade)
+  await prisma.user.delete({ where: { id: userId } });
 }
 
 async function issueTokens(user: { id: string; email: string }) {

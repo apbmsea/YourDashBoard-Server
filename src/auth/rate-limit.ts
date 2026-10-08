@@ -44,3 +44,22 @@ export async function assertCanRequestLink(email: string, ip: string | undefined
     }
   }
 }
+
+// Same per-mailbox limits as for magic links, counted from DeletionCode rows.
+export async function assertCanRequestDeletionCode(userId: string): Promise<void> {
+  const now = Date.now();
+  const sent = await prisma.deletionCode.findMany({
+    where: { userId, createdAt: { gt: new Date(now - HOUR_MS) } },
+    orderBy: { createdAt: 'desc' },
+    select: { createdAt: true },
+  });
+
+  const last = sent[0];
+  if (last) {
+    const cooldownLeft = last.createdAt.getTime() + config.MAGIC_LINK_COOLDOWN_SECONDS * 1000 - now;
+    if (cooldownLeft > 0) throw tooMany(cooldownLeft);
+  }
+  if (sent.length >= config.MAGIC_LINK_MAX_PER_EMAIL_PER_HOUR) {
+    throw tooMany(sent[sent.length - 1]!.createdAt.getTime() + HOUR_MS - now);
+  }
+}
